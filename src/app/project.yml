@@ -28,6 +28,8 @@ targets:
       - path: Husk
         excludes:
           - "Resources/**"
+          # Processed via INFOPLIST_FILE, never copied as a bundle resource.
+          - "Info.plist"
       # NOT `type: folder`: a folder reference copies the directory itself into the
       # bundle, and Bundle.path(forResource:ofType:) does not search subdirectories,
       # so the script would be present but unfindable at runtime.
