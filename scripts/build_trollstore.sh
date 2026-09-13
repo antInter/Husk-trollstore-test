@@ -46,7 +46,7 @@ for n in [info['CFBundleExecutable'],'Frameworks/libqemu-aarch64-softmmu.dylib',
  assert (app/n).is_file() and (app/n).stat().st_size, 'Missing bundle file: '+n
 assert not list(app.rglob('*ANGLE*'))
 for f in [app/info['CFBundleExecutable'],*app.rglob('*.dylib')]:
- subprocess.run(['xcrun','lipo','-verify_arch','arm64',str(f)],check=True)
+ subprocess.run(['xcrun','lipo',str(f),'-verify_arch','arm64'],check=True)
  text=subprocess.check_output(['xcrun','otool','-l',str(f)],text=True)
  versions=re.findall(r'\bminos\s+([\d.]+)',text)
  if not versions: versions=re.findall(r'cmd LC_VERSION_MIN_IPHONEOS\s+cmdsize \d+\s+version ([\d.]+)',text)
