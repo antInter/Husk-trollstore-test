@@ -211,7 +211,8 @@ final class QemuRunner: ObservableObject {
     nonisolated static var gpuModeEnabled: Bool {
         // Absent means GPU: bool(forKey:) answers false for a key nobody
         // has set, which quietly made the slow renderer the default.
-        UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true
+        !JITBootstrap.isTrollStoreBuild &&
+            (UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true)
     }
 
     /// Which display device the saved machine was built around.
@@ -793,7 +794,9 @@ final class QemuRunner: ObservableObject {
         // claims it before this runs, so os_proc_available_memory() has already
         // fallen by that much -- subtracting again charged for it twice and cut
         // the guest from 1906 MiB to 1650.
-        let jitStillToCome = JITBootstrap.prewarmed ? 0 : jitMiB
+        // Legacy prewarm does not fault every page; budget future residency.
+        let jitStillToCome = (JITBootstrap.prewarmed && !JITBootstrap.isTrollStoreBuild)
+            ? 0 : jitMiB
         let anonymousTarget = max(1024, min(6144,
             availableMiB - safetyMarginMiB - jitStillToCome - qemuOverheadMiB))
 
@@ -825,7 +828,8 @@ final class QemuRunner: ObservableObject {
         // made for it -- the address space is there, the file maps and writes
         // -- and then killed qemu_init three times regardless. Whatever objects
         // to it is not something this code can see, so it is simply not offered.
-        var candidates = [5120, 4096, 3584, 3072, 2560, 2048]
+        var candidates: [Int] = JITBootstrap.isTrollStoreBuild
+            ? [] : [5120, 4096, 3584, 3072, 2560, 2048]
 
         // Fold a failed attempt into the permanent floor before using it.
         if let attempted = readInt(ramAttemptPath), readInt(ramProvenPath) != attempted {
@@ -1096,6 +1100,10 @@ final class QemuRunner: ObservableObject {
     /// Creation is unconditional now. Only the *probe* is skipped once the
     /// answer is known, because that is the part that is merely a question.
     private func probeGL() {
+        guard Self.gpuModeEnabled else {
+            HuskLog.log("gl", "software renderer selected; skipping ANGLE")
+            return
+        }
         HuskGLView.surfaceReady.lock()
         let deadline = Date().addingTimeInterval(5)
         while HuskGLView.layerForGL == nil, Date() < deadline {

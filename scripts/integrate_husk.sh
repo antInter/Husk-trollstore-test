@@ -19,8 +19,7 @@ if grep -q "alloc_code_gen_buffer_splitwx_husk_ios" "$Q/tcg/region.c"; then
     echo "[skip] tcg/region.c already patched"
 else
     echo "[patch] tcg/region.c <- husk-qemu-ios-jit.patch"
-    patch -p0 -d / --silent < "$HUSK_ROOT/patches/husk-qemu-ios-jit.patch" 2>/dev/null \
-      || patch -p1 -d "$Q" --silent < "$HUSK_ROOT/patches/husk-qemu-ios-jit.patch" 2>/dev/null \
+    patch --batch -p1 -d "$Q" < "$HUSK_ROOT/patches/husk-qemu-ios-jit.patch" \
       || { echo "  FAILED to apply region.c patch" >&2; exit 1; }
 fi
 
@@ -29,6 +28,7 @@ cp "$HUSK_ROOT/src/ios-jit/husk-display.c" \
    "$HUSK_ROOT/src/ios-jit/husk-display.h" "$Q/ui/"
 
 echo "[cp  ] GL display bridge -> ui/"
+cp "$HUSK_ROOT/src/ios-jit/husk-display-gl-stub.c" "$Q/ui/"
 cp "$HUSK_ROOT/src/ios-jit/husk-display-gl.c" \
    "$HUSK_ROOT/src/ios-jit/husk-display-gl.h" "$Q/ui/"
 
@@ -82,6 +82,12 @@ if "husk-display-gl.c" not in s:
     print("  ui/meson.build: added husk-display-gl.c (CONFIG_OPENGL)")
 else:
     print("  ui/meson.build: GL bridge already wired")
+
+# Keep the Swift bridge ABI available without the GPU stack.
+s = p.read_text()
+if "husk-display-gl-stub.c" not in s:
+    s += "\nsystem_ss.add(when: 'CONFIG_OPENGL', if_false: files('husk-display-gl-stub.c'))\n"
+    p.write_text(s)
 
 # system/meson.build: balloon control. It lives here rather than in ui/ because
 # it calls qmp_balloon(), which system/balloon.c defines.
@@ -145,7 +151,10 @@ new = """        /*
          * CS_DEBUGGED without a trap servicer, so the first route fails and the
          * second, which would have worked, was never tried.
          */
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if defined(HUSK_TROLLSTORE)
+        /* Fail closed: never bypass a failed execution self-test. */
+        return -1;
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
         fprintf(stderr, "[husk-jit] dual mapping unavailable; trying MAP_JIT "
                         "instead (works without a trap servicer, but not "
                         "on a device with TXM)\\n");

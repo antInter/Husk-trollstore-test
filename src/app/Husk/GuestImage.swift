@@ -65,7 +65,9 @@ final class GuestImage: ObservableObject {
 
     /// Whether to fetch the pre-booted snapshot rather than boot from cold.
     static var wantsSnapshot: Bool {
-        UserDefaults.standard.object(forKey: "husk.downloadSnapshot") as? Bool ?? true
+        // Avoid automatic 4 GiB RAM snapshot restores on older phones.
+        UserDefaults.standard.object(forKey: "husk.downloadSnapshot") as? Bool
+            ?? !JITBootstrap.isTrollStoreBuild
     }
 
     /// A machine that has already finished booting, gzipped.

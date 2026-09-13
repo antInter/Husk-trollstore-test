@@ -5,7 +5,7 @@
 	<!-- These four are NOT optional: without CFBundleIdentifier and
 	     CFBundleExecutable the bundle will not install at all. Xcode only injects
 	     them when GENERATE_INFOPLIST_FILE is on, which it is not when a custom
-	     INFOPLIST_FILE is supplied -- so they are declared here and filled in by
+	     INFOPLIST_FILE is supplied; so they are declared here and filled in by
 	     INFOPLIST_EXPAND_BUILD_SETTINGS (on by default). -->
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>

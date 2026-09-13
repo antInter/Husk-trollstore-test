@@ -201,6 +201,7 @@ static bool husk_jit_selftest(const HuskDualMapping *m)
     memcpy(m->rw_addr, kCode, sizeof(kCode));
 
     /* Flush the write through to the RX view before executing it. */
+    sys_dcache_flush(m->rw_addr, sizeof(kCode));
     sys_icache_invalidate(m->rx_addr, sizeof(kCode));
     HUSK_LOG("selftest: icache invalidated on RX alias %p", (void *)m->rx_addr);
 
@@ -256,10 +257,11 @@ static bool husk_prewarm_done;
 HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes)
 {
     if (husk_prewarm_done) {
-        return husk_prewarmed.rw_addr != NULL;
+        return atomic_load(&g_jit_available);
     }
-    husk_prewarm_done = true;
     husk_prewarmed = husk_ios_jit_allocate_real(bytes);
+    /* Allow retry after JIT is enabled; do not cache failures. */
+    husk_prewarm_done = husk_prewarmed.rw_addr != NULL;
     fprintf(stderr, "[husk-jit] prewarm %s: %zu bytes\n",
             husk_prewarmed.rw_addr ? "OK" : "FAILED", bytes);
     return husk_prewarmed.rw_addr != NULL;
@@ -275,13 +277,69 @@ HuskDualMapping husk_ios_jit_allocate(size_t bytes)
     if (husk_prewarmed.rw_addr && husk_prewarmed.size >= bytes) {
         fprintf(stderr, "[husk-jit] using the prewarmed region (%zu bytes)\n",
                 husk_prewarmed.size);
-        return husk_prewarmed;
+        HuskDualMapping result = husk_prewarmed;
+        husk_prewarmed = (HuskDualMapping){ NULL, NULL, 0 };
+        return result; /* Transfer ownership exactly once. */
     }
     return husk_ios_jit_allocate_real(bytes);
 }
 
+#ifdef HUSK_TROLLSTORE
+/* Experimental iOS 15 route. TrollStore attaches then detaches, leaving
+ * CS_DEBUGGED set. No live StikDebug server exists to service brk RPCs.
+ * Alias ordinary RW pages, then protect the second view RX. No MAP_JIT or
+ * pthread JIT toggles are involved. This does NOT grant JIT authorization.
+ * Both aliasing and generated-code execution must pass the self-test.
+ */
+static HuskDualMapping husk_ios_jit_allocate_legacy(size_t bytes)
+{
+    HuskDualMapping m = { NULL, NULL, 0 };
+    size_t page = (size_t)vm_page_size;
+    if (bytes == 0 || bytes > SIZE_MAX - page + 1) { return m; }
+    bytes = (bytes + page - 1) & ~(page - 1);
+    void *rw = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (rw == MAP_FAILED) {
+        HUSK_LOG("legacy: mmap(RW) failed: %s", strerror(errno));
+        return m;
+    }
+    vm_address_t rx = 0;
+    vm_prot_t current, maximum;
+    kern_return_t kr = vm_remap(mach_task_self(), &rx, (vm_size_t)bytes,
+                                0, VM_FLAGS_ANYWHERE, mach_task_self(),
+                                (vm_address_t)rw, FALSE, &current, &maximum,
+                                VM_INHERIT_NONE);
+    if (kr != KERN_SUCCESS) {
+        HUSK_LOG("legacy: vm_remap failed: %s", mach_error_string(kr));
+        munmap(rw, bytes);
+        return m;
+    }
+    kr = vm_protect(mach_task_self(), rx, (vm_size_t)bytes, FALSE,
+                    VM_PROT_READ | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        HUSK_LOG("legacy: vm_protect(RX) failed: %s; use TrollStore Open with JIT",
+                 mach_error_string(kr));
+        vm_deallocate(mach_task_self(), rx, (vm_size_t)bytes);
+        munmap(rw, bytes);
+        return m;
+    }
+    m = (HuskDualMapping){ rw, (uint8_t *)rx, bytes };
+    HUSK_LOG("legacy: testing local RW/RX mapping, %zu bytes; no StikDebug traps", bytes);
+    if (!husk_jit_selftest(&m)) {
+        husk_ios_jit_release(&m);
+        return m;
+    }
+    atomic_store(&g_jit_available, true);
+    husk_ios_jit_log_footprint("legacy-jit-ready");
+    return m;
+}
+#endif
+
 static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
 {
+#ifdef HUSK_TROLLSTORE
+    return husk_ios_jit_allocate_legacy(bytes);
+#else
     HuskDualMapping region = { NULL, NULL, 0 };
     uint64_t n = atomic_fetch_add(&g_alloc_counter, 1) + 1;
 
@@ -380,8 +438,6 @@ static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
     region.rw_addr = (uint8_t *)rw;
     region.rx_addr = (uint8_t *)rx;
     region.size    = bytes;
-    atomic_store(&g_jit_available, true);
-
     HUSK_LOG("#%llu: dual mapping established: rw=%p rx=%p size=%zu diff=%+lld",
              (unsigned long long)n, (void *)region.rw_addr, (void *)region.rx_addr,
              region.size, (long long)(region.rx_addr - region.rw_addr));
@@ -396,7 +452,9 @@ static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
         return region;
     }
 
+    atomic_store(&g_jit_available, true);
     return region;
+#endif
 }
 
 void husk_ios_jit_release(HuskDualMapping *m)
@@ -413,15 +471,21 @@ void husk_ios_jit_release(HuskDualMapping *m)
         m->rx_addr = NULL;
     }
     m->size = 0;
+    atomic_store(&g_jit_available, false);
+    husk_prewarm_done = false;
 }
 
 void husk_ios_jit_detach(void)
 {
+#ifdef HUSK_TROLLSTORE
+    return; /* TrollStore already detached; never issue StikDebug RPC. */
+#else
     HUSK_LOG("detaching debugger; RX mappings persist after this");
     g_expecting_jit_trap = true;
     husk_brk_jit_detach();
     g_expecting_jit_trap = false;
     HUSK_LOG("debugger detached");
+#endif
 }
 
 bool husk_ios_jit_is_available(void)

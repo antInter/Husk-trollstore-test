@@ -1,5 +1,5 @@
---- /tmp/region.c.orig	2026-09-11 22:56:49
-+++ third_party/build/qemu-10.0.12-utm/tcg/region.c	2026-09-11 23:35:36
+--- a/tcg/region.c
++++ b/tcg/region.c
 @@ -34,6 +34,13 @@
  #include "exec/translation-block.h"
  #include "tcg-internal.h"
@@ -39,8 +39,8 @@
 +    m = husk_ios_jit_allocate(size);
 +    if (m.rw_addr == NULL) {
 +        error_setg(errp,
-+                   "husk: could not obtain %zu bytes of JIT memory. Attach "
-+                   "StikDebug with the Universal JIT script before booting.",
++                   "husk: could not validate %zu bytes of JIT memory. "
++                   "Enable JIT using this build's enabler and check the logs.",
 +                   size);
 +        return -1;
 +    }

@@ -1,0 +1,36 @@
+name: Experimental iOS 15 TrollStore IPA
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tools
+        run: |
+          brew install autoconf automake libtool pkgconf ninja xcodegen
+          python3 -m pip install meson==1.9.1 PyYAML==6.0.2 packaging==25.0
+      - name: Build and validate bundle
+        run: bash scripts/build_trollstore.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Husk-TS15-experimental
+          path: build/artifacts/Husk-TS15.ipa*
+          if-no-files-found: error
+      - name: Preserve build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-TS15-logs
+          path: build/logs/
+          if-no-files-found: warn

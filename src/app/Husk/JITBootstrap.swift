@@ -3,8 +3,8 @@ import Foundation
 import UIKit
 import os
 
-/// `csops(2)`. Reading CS_DEBUGGED is how we ask "is a debugger attached right
-/// now" without executing anything — unlike the brk probe, which costs a trap.
+/// CS_DEBUGGED can persist after detach. TrollStore attaches then detaches;
+/// this checks authorization, NOT whether a debugger is still attached.
 @_silgen_name("csops")
 private func csops(_ pid: Int32, _ ops: Int32,
                    _ useraddr: UnsafeMutableRawPointer?, _ usersize: Int) -> Int32
@@ -19,7 +19,12 @@ private let CS_DEBUGGED = UInt32(0x10000000)
 /// Husk hands it the JIT script inline over its URL scheme, so the user never has
 /// to configure anything inside StikDebug for Husk specifically.
 enum JITBootstrap {
-    private static let log = Logger(subsystem: "com.husk.app", category: "jit")
+    #if HUSK_TROLLSTORE
+    static let isTrollStoreBuild = true
+    #else
+    static let isTrollStoreBuild = false
+    #endif
+    static var enablerName: String { isTrollStoreBuild ? "TrollStore" : "StikDebug" }
 
     enum State: Equatable {
         case unknown
@@ -33,6 +38,7 @@ enum JITBootstrap {
     /// Without this, a `brk` that StikDebug is not there to service is a fatal
     /// SIGTRAP rather than a failed call — the process simply dies.
     static func installTrapGuard() {
+        guard !isTrollStoreBuild else { return }
         HuskLog.log("jit", "installing brk trap guard")
         husk_ios_jit_install_trap_handler()
         HuskLog.log("jit", "trap guard installed -- an unserviced brk will now "
@@ -65,22 +71,22 @@ enum JITBootstrap {
     /// not work. So claim it first and hold it.
     @discardableResult
     static func prewarm() -> Bool {
-        guard isDebuggerAttached else {
-            HuskLog.log("jit", "no debugger attached yet; not prewarming")
+        guard isProcessDebugged else {
+            lastFailure = "Enable JIT with \(enablerName) first, then return to Husk."
+            HuskLog.log("jit", "CS_DEBUGGED clear; not prewarming")
             return false
         }
         HuskLog.log("jit", "claiming \(jitBytes / (1024 * 1024)) MiB of JIT memory now, "
-                         + "before the guest download -- StikDebug does not stay attached")
+                         + "using \(enablerName)")
         let ok = husk_ios_jit_prewarm(jitBytes)
         if ok { prewarmed = true; lastFailure = nil }
         else {
-            lastFailure = "The debugger is attached but is not answering trap "
-                        + "requests, so no executable memory could be claimed. "
-                        + "This is what happens when Husk runs inside another "
-                        + "container app rather than sideloaded on its own."
+            lastFailure = isTrollStoreBuild
+                ? "JIT validation failed. In TrollStore use Open with JIT for Husk TS15, then retry. Share the logs if it still fails."
+                : "Could not validate executable memory. Re-enable JIT with StikDebug and check the logs."
         }
         HuskLog.log("jit", ok ? "JIT region secured; it will be handed to QEMU later"
-                              : "JIT prewarm FAILED -- StikDebug is not servicing traps")
+                              : "JIT prewarm FAILED -- see allocator diagnostics")
         return ok
     }
 
@@ -108,7 +114,7 @@ enum JITBootstrap {
     /// True only after a JIT region has been allocated AND passed the execute
     /// self-test — which happens inside `qemu_init`. It is therefore always false
     /// before the guest starts, and must NOT be used to decide whether to start it.
-    /// Use `isDebuggerAttached` for that, and this afterwards to confirm it worked.
+    /// Use `isProcessDebugged` for that, and this afterwards to confirm it worked.
     static var isLive: Bool { husk_ios_jit_is_available() }
 
     /// The actual precondition for starting the guest: StikDebug has attached.
@@ -118,7 +124,7 @@ enum JITBootstrap {
     /// every time, and every trap is a chance to hit a moment when StikDebug is
     /// not listening. The brk probe still runs once, inside the allocator, where
     /// its answer is immediately acted on.
-    static var isDebuggerAttached: Bool {
+    static var isProcessDebugged: Bool {
         var flags: UInt32 = 0
         let rc = withUnsafeMutableBytes(of: &flags) { buf in
             csops(getpid(), CS_OPS_STATUS, buf.baseAddress, buf.count)
@@ -140,6 +146,7 @@ enum JITBootstrap {
     /// this point happens in a *new* foreground pass of the app.
     @MainActor
     static func requestAttach() -> Bool {
+        if isTrollStoreBuild { return requestTrollStoreJIT() }
         HuskLog.log("jit", "requestAttach() -- handing off to StikDebug")
 
         guard let bundleID = Bundle.main.bundleIdentifier else {
@@ -177,6 +184,26 @@ enum JITBootstrap {
         HuskLog.log("jit", "opening stikjit:// for bundle \(bundleID); "
                          + "Husk will be backgrounded and relaunched after attach")
         UIApplication.shared.open(launchURL)
+        return true
+    }
+
+    // Official TrollStore 2.0.12+ URL scheme. No embedded exploit/root helper.
+    @MainActor
+    private static func requestTrollStoreJIT() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+        var components = URLComponents()
+        components.scheme = "apple-magnifier"
+        components.host = "enable-jit"
+        components.queryItems = [URLQueryItem(name: "bundle-id", value: bundleID)]
+        guard let url = components.url, UIApplication.shared.canOpenURL(url) else {
+            lastFailure = "Open Husk TS15 using Open with JIT in TrollStore 2.0.12 or later. Its URL scheme may be disabled."
+            return false
+        }
+        // Magnifier can also handle this scheme; this is not an installation test.
+        UIApplication.shared.open(url) { opened in
+            if !opened { HuskLog.log("jit", "TrollStore URL could not be opened") }
+        }
+        HuskLog.log("jit", "requested TrollStore JIT; return to Husk and test JIT")
         return true
     }
 

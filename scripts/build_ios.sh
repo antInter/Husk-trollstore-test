@@ -8,7 +8,7 @@
 #
 # Usage: ./scripts/build_ios.sh [stage ...]      (no args = all stages)
 #        stages: libffi glib pixman libucontext libslirp qemu
-set -uo pipefail
+set -euo pipefail
 
 HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$HUSK_ROOT/third_party/build"
@@ -20,6 +20,18 @@ mkdir -p "$PREFIX" "$LOGS" "$STAMPS"
 ARCH=arm64
 SDK=iphoneos
 SDKMINVER="${SDKMINVER:-16.0}"
+HUSK_TROLLSTORE="${HUSK_TROLLSTORE:-0}"
+if [ "$HUSK_TROLLSTORE" = 1 ] && [ "$SDKMINVER" != 15.0 ]; then
+    echo 'TrollStore variant requires SDKMINVER=15.0 for all dependencies' >&2
+    exit 1
+fi
+CONFIG_FILE="$HUSK_ROOT/build/ios-arm64/configuration.txt"
+CONFIG="ios=$SDKMINVER trollstore=$HUSK_TROLLSTORE"
+if [ -f "$CONFIG_FILE" ] && [ "$(cat "$CONFIG_FILE")" != "$CONFIG" ]; then
+    echo 'Configuration changed. Remove build/ and third_party/build/ before rebuilding.' >&2
+    exit 1
+fi
+printf '%s\n' "$CONFIG" > "$CONFIG_FILE"
 NCPU="$(sysctl -n hw.ncpu)"
 
 SDKROOT="$(xcrun --sdk $SDK --show-sdk-path)"
@@ -36,6 +48,9 @@ export STRIP="$(xcrun --sdk $SDK --find strip)"
 export LD="$(xcrun --sdk $SDK --find ld)"
 
 export CFLAGS="-arch $ARCH -isysroot $SDKROOT -I$PREFIX/include $CFLAGS_TARGET -O2"
+if [ "$HUSK_TROLLSTORE" = 1 ]; then
+    CFLAGS="$CFLAGS -DHUSK_TROLLSTORE=1 -Werror=unguarded-availability"
+fi
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS="-arch $ARCH -isysroot $SDKROOT -I$PREFIX/include $CFLAGS_TARGET"
 export OBJCFLAGS="$CFLAGS"
@@ -139,7 +154,8 @@ apply_patch() {
     [ -f "$stamp" ] && return 0
     [ -f "$HUSK_ROOT/patches/$patch" ] || return 0
     echo "[patch] $dir <- $patch"
-    ( cd "$SRC/$dir" && patch -p1 -N -r - < "$HUSK_ROOT/patches/$patch" ) >/dev/null 2>&1
+    ( cd "$SRC/$dir" && patch --batch -p1 -N < "$HUSK_ROOT/patches/$patch" ) \
+        || { echo "Patch failed: $patch" >&2; exit 1; }
     touch "$stamp"
 }
 
@@ -155,11 +171,17 @@ stage_libucontext() { build_meson libucontext "$CROSS_IOS" -Dfreestanding=true; 
 stage_libslirp()    { apply_patch libslirp-v4.9.1 libslirp-v4.9.1.patch
                       build_meson libslirp-v4.9.1 "$CROSS_DARWIN"; }
 
+stage_qemupatch() { apply_patch qemu-10.0.12-utm qemu-10.0.12-utm.patch; }
+
 stage_qemu() {
     local dir="$SRC/qemu-10.0.12-utm"
     local log="$LOGS/qemu.log"
     done_stage qemu && { echo "[skip] qemu"; return 0; }
     apply_patch qemu-10.0.12-utm qemu-10.0.12-utm.patch
+    local gpu_flags=(--enable-opengl --enable-virglrenderer)
+    if [ "$HUSK_TROLLSTORE" = 1 ]; then
+        gpu_flags=(--disable-opengl --disable-virglrenderer)
+    fi
     banner "building qemu (this is the long one)"
     rm -rf "$dir/_husk_build"; mkdir -p "$dir/_husk_build"
     ( cd "$dir/_husk_build" \
@@ -172,7 +194,7 @@ stage_qemu() {
             --enable-slirp \
             --disable-cocoa --disable-sdl --disable-gtk --disable-coreaudio \
             --disable-vnc --disable-spice \
-            --enable-opengl --enable-virglrenderer \
+            "${gpu_flags[@]}" \
             --disable-curses --disable-curl --disable-libusb --disable-usb-redir \
             --disable-tpm --disable-docs --disable-guest-agent --disable-tools \
             --disable-hvf --disable-vde --disable-brlapi --disable-libssh \
@@ -219,4 +241,4 @@ echo "HUSK build: PREFIX=$PREFIX"
 echo "            SDK=$SDKROOT ($SDKVERSION), min=$SDKMINVER, ncpu=$NCPU"
 for s in "${STAGES[@]}"; do "stage_$s"; done
 banner "build complete"
-ls -la "$PREFIX/lib" 2>/dev/null | head -20
+if [ -d "$PREFIX/lib" ]; then ls -la "$PREFIX/lib" | sed -n '1,20p'; fi

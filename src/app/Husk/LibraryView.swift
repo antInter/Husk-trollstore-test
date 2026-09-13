@@ -17,7 +17,7 @@ struct LibraryView: View {
     private let columns = [GridItem(.adaptive(minimum: 92, maximum: 120), spacing: 24)]
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             Group {
                 if bridge.apps.isEmpty {
                     empty
@@ -31,7 +31,7 @@ struct LibraryView: View {
                     Button { importing = true } label: { Image(systemName: "plus") }
                         .accessibilityLabel("Add APK")
                 }
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .navigationBarLeading) {
                     Button { showLogs = true } label: {
                         Image(systemName: "doc.text.magnifyingglass")
                     }
@@ -39,6 +39,7 @@ struct LibraryView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
         .fileImporter(isPresented: $importing,
                       allowedContentTypes: [Self.apkType, .item],
                       allowsMultipleSelection: true) { result in

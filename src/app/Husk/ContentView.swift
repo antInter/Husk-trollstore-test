@@ -126,14 +126,14 @@ struct ContentView: View {
         // first. Booting takes minutes and its cost depends on choices made
         // before it starts -- which display, whether to fetch a pre-booted
         // snapshot -- so it is a decision, not a side effect of launching.
-        if !JITBootstrap.isDebuggerAttached {
+        if !JITBootstrap.isProcessDebugged {
             HuskLog.log("ui", "no debugger attached; waiting for StikDebug")
         }
     }
 
     private func start() {
         guard !started else { return }
-        guard JITBootstrap.isDebuggerAttached else { return }
+        guard JITBootstrap.isProcessDebugged else { return }
         HuskLog.log("ui", "CS_DEBUGGED set; starting QEMU")
         // Take the JIT region at the last moment before QEMU, as well as before
         // the download. Whichever comes first wins; the second call is a no-op.
@@ -151,9 +151,8 @@ struct ContentView: View {
         // still buys a MAP_JIT mapping, and QEMU now falls back to it -- so
         // stopping here would refuse to start a guest that would have run.
         if !JITBootstrap.prewarm(), !JITBootstrap.isLive {
-            if JITBootstrap.needsTrapServicer {
-                HuskLog.log("jit", "refusing to start QEMU: this device needs a "
-                                 + "trap servicer and none is answering")
+            if JITBootstrap.isTrollStoreBuild || JITBootstrap.needsTrapServicer {
+                HuskLog.log("jit", "refusing to start QEMU: JIT execution self-test did not pass")
                 return
             }
             HuskLog.log("jit", "no dual mapping, but this device has no TXM -- "
@@ -263,6 +262,8 @@ struct SetupView: View {
 
     @State private var profile: QemuRunner.Profile = .phase1Android
     @State private var showSettings = false
+    @State private var jitMessage: String?
+    @Environment(\.scenePhase) private var setupScenePhase
 
     var body: some View {
         ZStack {
@@ -274,6 +275,27 @@ struct SetupView: View {
                     .font(.footnote).foregroundStyle(.secondary)
 
                 content
+                if JITBootstrap.isTrollStoreBuild {
+                    Text("Experimental iOS 15 build · Software graphics")
+                        .font(.caption).foregroundStyle(.orange)
+                    HStack {
+                        Button("Enable JIT with TrollStore") {
+                            let opened = JITBootstrap.requestAttach()
+                            jitMessage = opened ? "Return to Husk, then tap Test JIT."
+                                : JITBootstrap.lastFailure
+                        }
+                        Button("Test JIT") {
+                            jitMessage = JITBootstrap.prewarm()
+                                ? "JIT test passed: generated code returned 42."
+                                : JITBootstrap.lastFailure
+                        }
+                    }
+                    .buttonStyle(.bordered).font(.caption)
+                    if let jitMessage {
+                        Text(jitMessage).font(.caption)
+                            .multilineTextAlignment(.center).padding(.horizontal, 24)
+                    }
+                }
             }
             .foregroundStyle(.white)
 
@@ -294,6 +316,13 @@ struct SetupView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(profile: $profile, showLogs: $showLogs)
+        }
+        .onChange(of: setupScenePhase) { phase in
+            if phase == .active, JITBootstrap.isTrollStoreBuild {
+                jitMessage = JITBootstrap.isProcessDebugged
+                    ? "JIT authorization detected. Tap Test JIT to verify execution."
+                    : "JIT is not enabled for this process yet."
+            }
         }
     }
 
@@ -349,7 +378,7 @@ struct SetupView: View {
                 }
             case .ready:
                 VStack(spacing: 12) {
-                    if JITBootstrap.isDebuggerAttached {
+                    if JITBootstrap.isProcessDebugged {
                         // The library first: it is the thing Husk is for. Full
                         // screen is the escape hatch for everything the library
                         // cannot express -- settings, the launcher, a wizard.
@@ -369,13 +398,13 @@ struct SetupView: View {
                         .padding(.horizontal, 24)
                         .padding(.top, 4)
                     } else {
-                        Text("Husk needs executable memory, which on iOS only an attached debugger can grant.")
+                        Text("Enable JIT with \(JITBootstrap.enablerName) before starting Android.")
                             .font(.callout).foregroundStyle(.secondary)
                             .multilineTextAlignment(.center).padding(.horizontal, 36)
-                        Button("Enable JIT with StikDebug") {
-                            _ = JITBootstrap.requestAttach()
+                        if !JITBootstrap.isTrollStoreBuild {
+                            Button("Enable JIT with StikDebug") { _ = JITBootstrap.requestAttach() }
+                                .buttonStyle(.borderedProminent)
                         }
-                        .buttonStyle(.borderedProminent)
                     }
                     // Attached and still unable to claim memory is a different
                     // problem from not being attached, and it used to present as
@@ -498,12 +527,8 @@ struct SettingsView: View {
     @Binding var showLogs: Bool
 
     @ObservedObject private var guest = GuestImage.shared
-    @State private var gpuMode =
-        // Absent means GPU: bool(forKey:) answers false for a key nobody
-        // has set, which quietly made the slow renderer the default.
-        UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true
-    @State private var useSnapshot =
-        UserDefaults.standard.object(forKey: "husk.downloadSnapshot") as? Bool ?? true
+    @State private var gpuMode = QemuRunner.gpuModeEnabled
+    @State private var useSnapshot = GuestImage.wantsSnapshot
     @State private var askWhichToDelete = false
     @State private var deleteResult: String?
 
@@ -599,6 +624,7 @@ struct SettingsView: View {
                         Text("CPU").tag(false)
                     }
                     .pickerStyle(.segmented)
+                    .disabled(JITBootstrap.isTrollStoreBuild)
                     .onChange(of: gpuMode) { v in
                         UserDefaults.standard.set(v, forKey: "husk.gpuMode")
                         HuskLog.log("ui", v ? "GPU renderer selected"
@@ -611,7 +637,9 @@ struct SettingsView: View {
                     // and cold-booted every launch. Both stopped being true once
                     // the virgl save worked, and a warning that has gone stale is
                     // worse than none -- it argues for the slower option.
-                    Text(gpuMode
+                    Text(JITBootstrap.isTrollStoreBuild
+                         ? "This iOS 15 build omits ANGLE/virgl. Software graphics can be much slower."
+                         : gpuMode
                          ? "Android draws on the real GPU through Metal, about four "
                          + "times the frame rate. This is the default."
                          : "Every pixel is drawn by the emulated CPU. Much slower, "
@@ -655,7 +683,6 @@ struct AdbLibraryView: View {
     @Binding var showLogs: Bool
 
     @State private var importing = false
-    @State private var sendingFiles = false
     /// Not persisted on purpose: it lives in the guest, and the guest is
     /// restored from a snapshot that may or may not have had it applied.
 
@@ -673,14 +700,7 @@ struct AdbLibraryView: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        Button { importing = true } label: {
-                            Label("Install an APK", systemImage: "square.and.arrow.down")
-                        }
-                        Button { sendingFiles = true } label: {
-                            Label("Send files to Android", systemImage: "doc.badge.plus")
-                        }
-                    } label: { Image(systemName: "plus") }
+                    Button { importing = true } label: { Image(systemName: "plus") }
                         .disabled(!host.isReady || host.busy != nil)
                 }
             }
@@ -690,14 +710,6 @@ struct AdbLibraryView: View {
                 if case .success(let urls) = result, let apk = urls.first {
                     HuskLog.log("ui", "importing \(apk.lastPathComponent)")
                     host.install(apk)
-                }
-            }
-            .fileImporter(isPresented: $sendingFiles,
-                          allowedContentTypes: [.item],
-                          allowsMultipleSelection: true) { result in
-                if case .success(let urls) = result {
-                    HuskLog.log("ui", "sending \(urls.count) file(s) to Android")
-                    host.sendFiles(urls)
                 }
             }
         }
@@ -778,7 +790,7 @@ struct LogView: View {
     private let tick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 1) {
@@ -817,6 +829,7 @@ struct LogView: View {
                 ])
             }
         }
+        .navigationViewStyle(.stack)
     }
 
     /// Colour by source so the JIT path stands out from QEMU's own chatter.

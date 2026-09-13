@@ -17,9 +17,11 @@ struct HuskApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .statusBarHidden(true)
-                .persistentSystemOverlays(.hidden)
+            if #available(iOS 16.0, *) {
+                ContentView().statusBarHidden(true).persistentSystemOverlays(.hidden)
+            } else {
+                ContentView().statusBarHidden(true)
+            }
         }
     }
 }
