@@ -8,12 +8,12 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install tools
@@ -22,14 +22,30 @@ jobs:
           python3 -m pip install meson==1.9.1 PyYAML==6.0.2 packaging==25.0
       - name: Build and validate bundle
         run: bash scripts/build_trollstore.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: Husk-TS15-experimental
           path: build/artifacts/Husk-TS15.ipa*
           if-no-files-found: error
+      - name: Summarize build errors
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '## Husk build diagnostics'
+            echo 'Node runtime warnings are separate from compiler/build errors.'
+            echo 'Download Husk-TS15-logs for the complete logs.'
+            echo '```text'
+            if [ -d build/logs ]; then
+              grep -RniE 'error:|fatal error|undefined symbols|BUILD FAILED|FAILED:' build/logs | head -80 || true
+            else
+              echo 'Build logs were not created; inspect the failed setup step.'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve build logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Husk-TS15-logs
           path: build/logs/
