@@ -27,6 +27,8 @@ if [ -f "$BUILT" ] && [ "$BUILT" -nt "$STAGED" ]; then
     cp "$BUILT" "$STAGED"
 fi
 
+python3 "$HUSK_ROOT/scripts/fetch_guest_seeds.py"
+
 # Regenerate the project first.
 #
 # project.yml globs src/app/Husk, so adding a source file there is meant to be
@@ -114,7 +116,7 @@ for lib in libqemu-aarch64-softmmu.dylib libANGLE-shared.dylib; do
 done
 
 # Guest images, or QEMU fails with "could not load kernel".
-for f in vmlinuz-virt initramfs-virt husk-jit.js; do
+for f in vmlinuz-virt initramfs-virt husk-jit.js lineage-efi-vars-seed.fd lineage-vdb-seed.qcow2; do
     if [ ! -f "$APP/$f" ]; then
         echo "  MISSING  $f" >&2
         rc=1

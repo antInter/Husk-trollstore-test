@@ -1,4 +1,4 @@
-name: Experimental iOS 15 TrollStore IPA
+name: iOS 15 TrollStore IPA - seed fix r2
 on:
   workflow_dispatch:
 permissions:
@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build_trollstore.sh
       - uses: actions/upload-artifact@v6
         with:
-          name: Husk-TS15-experimental
+          name: Husk-TS15-seedfix-r2
           path: build/artifacts/Husk-TS15.ipa*
           if-no-files-found: error
       - name: Summarize build errors

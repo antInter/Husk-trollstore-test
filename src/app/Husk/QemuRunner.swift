@@ -12,7 +12,8 @@ import os
 final class QemuRunner: ObservableObject {
     static let shared = QemuRunner()
     private var thread: Thread?
-    private(set) var isRunning = false
+    @Published private(set) var isRunning = false
+    @Published var startupError: String?
 
     /// Last line the guest printed about its own setup. The first-boot service in
     /// the guest writes HUSK-SETUP markers to the serial console, which is already
@@ -1188,6 +1189,16 @@ final class QemuRunner: ObservableObject {
             let size = (attrs?[.size] as? NSNumber)?.intValue ?? -1
             HuskLog.log("qemu", "needs \((path as NSString).lastPathComponent): "
                               + (size >= 0 ? "\(size) bytes" : "MISSING"))
+            guard size > 0, FileManager.default.isReadableFile(atPath: path) else {
+                let message = "\((path as NSString).lastPathComponent): missing, empty, or unreadable"
+                HuskLog.log("preflight", "FAIL on QEMU thread: \(message)")
+                HuskLog.flushNow()
+                DispatchQueue.main.async {
+                    self.startupError = message
+                    self.isRunning = false
+                }
+                return
+            }
         }
 
         if QemuRunner.glProven {
@@ -1211,6 +1222,7 @@ final class QemuRunner: ObservableObject {
         if QemuRunner.glProven { setenv("HUSK_VIRGL_SNAPSHOT", "1", 1) }
 
         HuskLog.log("qemu", "calling qemu_init() -- JIT allocation happens inside this")
+        HuskLog.flushNow()
         argv.withUnsafeMutableBufferPointer { buf in
             qemu_init(Int32(args.count), buf.baseAddress)
         }

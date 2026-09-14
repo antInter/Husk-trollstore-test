@@ -5,13 +5,14 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 export SDKMINVER=15.0 HUSK_TROLLSTORE=1
 mkdir -p build/logs build/artifacts
+python3 scripts/fetch_guest_seeds.py
 bash scripts/fetch_sources.sh
 bash scripts/build_ios.sh libffi glib pixman libucontext libslirp qemupatch
 bash scripts/integrate_husk.sh
 bash scripts/build_ios.sh qemu
 bash scripts/fetch_phase0_guest.sh
 python3 - <<'PY'
-import json, plistlib, pathlib, yaml
+import json, plistlib, pathlib, yaml, os, subprocess, datetime
 p=pathlib.Path('src/app')
 s=yaml.safe_load((p/'project.yml').read_text())
 s['options']['deploymentTarget']['iOS']='15.0'
@@ -21,6 +22,13 @@ t['dependencies']=[d for d in t['dependencies'] if 'ANGLE' not in d.get('framewo
 (p/'project-trollstore.json').write_text(json.dumps(s))
 i=plistlib.loads((p/'Husk/Info.plist').read_bytes())
 i['CFBundleDisplayName']='Husk TS15'
+i['CFBundleVersion']=os.environ.get('GITHUB_RUN_NUMBER','2')
+try:
+    commit=subprocess.check_output(['git','rev-parse','--short','HEAD'],text=True).strip()
+except (subprocess.CalledProcessError, FileNotFoundError):
+    commit='source-zip'
+i['HuskBuildCommit']='seedfix-r2-'+commit
+i['HuskBuildDate']=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 i['LSApplicationQueriesSchemes']=['apple-magnifier']
 (p/'Info-TrollStore.plist').write_bytes(plistlib.dumps(i))
 # Never include dynamic-codesigning or the private debugger/library-validation
@@ -36,17 +44,18 @@ xcodebuild -project src/app/Husk.xcodeproj -scheme Husk -sdk iphoneos \
  IPHONEOS_DEPLOYMENT_TARGET=15.0 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
  build 2>&1 | tee build/logs/xcode-ts15.log
 APP="$DD/Build/Products/Release-iphoneos/Husk.app"
+python3 scripts/fetch_guest_seeds.py --verify-only "$APP"
 python3 - "$APP" <<'PY'
 import pathlib,plistlib,subprocess,sys,re
 app=pathlib.Path(sys.argv[1]); info=plistlib.loads((app/'Info.plist').read_bytes())
 assert info['CFBundleIdentifier']=='com.husk.app.ts15'
 def ver(s): return (tuple(map(int,s.split('.')))+(0,0,0))[:3]
 assert ver(info['MinimumOSVersion'])<=ver('15.0')
-for n in [info['CFBundleExecutable'],'Frameworks/libqemu-aarch64-softmmu.dylib','vmlinuz-virt','initramfs-virt','edk2-aarch64-code.fd']:
+for n in [info['CFBundleExecutable'],'Frameworks/libqemu-aarch64-softmmu.dylib','vmlinuz-virt','initramfs-virt','edk2-aarch64-code.fd','lineage-efi-vars-seed.fd','lineage-vdb-seed.qcow2','default.metallib']:
  assert (app/n).is_file() and (app/n).stat().st_size, 'Missing bundle file: '+n
 assert not list(app.rglob('*ANGLE*'))
 for f in [app/info['CFBundleExecutable'],*app.rglob('*.dylib')]:
- subprocess.run(['xcrun','lipo','-verify_arch','arm64',str(f)],check=True)
+ subprocess.run(['xcrun','lipo',str(f),'-verify_arch','arm64'],check=True)
  text=subprocess.check_output(['xcrun','otool','-l',str(f)],text=True)
  versions=re.findall(r'\bminos\s+([\d.]+)',text)
  if not versions: versions=re.findall(r'cmd LC_VERSION_MIN_IPHONEOS\s+cmdsize \d+\s+version ([\d.]+)',text)

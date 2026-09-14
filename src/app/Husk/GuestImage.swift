@@ -416,9 +416,10 @@ final class GuestImage: ObservableObject {
                 throw NSError(domain: "husk", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "lineage-efi-vars-seed.fd missing from the app bundle"])
             }
-            try? fm.removeItem(atPath: varsPath)
-            try fm.copyItem(atPath: seed, toPath: varsPath)
-            try? current.write(to: stamp, atomically: true, encoding: .utf8)
+            // Seed is tiny: replace atomically, preserving an old file on failure.
+            try Data(contentsOf: URL(fileURLWithPath: seed))
+                .write(to: URL(fileURLWithPath: varsPath), options: .atomic)
+            try current.write(to: stamp, atomically: true, encoding: .utf8)
         }
 
         // Userdata. Empty on arrival -- 16 GiB virtual, 192 KB on disk -- and
@@ -427,20 +428,16 @@ final class GuestImage: ObservableObject {
         // to the device layout signature: that changes for reasons that have
         // nothing to do with /data, and resetting it factory-resets the guest.
         //
-        // It has its own version instead, bumped only when userdata is known to
-        // be unusable. It is at v2 because a kernel panic killed the guest
-        // partway through building /data, and what it left behind made Android
-        // reboot into recovery on every subsequent start
-        // ("init_user0_failed"). Nothing short of a clean partition fixes that.
+        // Record seed versions for diagnosis, not as permission to factory-reset
+        // existing userdata. A reset must be a separate, explicit user decision.
         let seedStamp = URL(fileURLWithPath: userdataPath + ".seed")
-        // v3: the guest image changed, so userdata built against the old /system --
-        // including a multi-gigabyte snapshot of it -- has to go.
+        // Only newly created userdata receives this marker.
         let seedVersion = "v10"
         let seededWith = try? String(contentsOf: seedStamp, encoding: .utf8)
-        if fm.fileExists(atPath: userdataPath), seededWith != seedVersion {
-            HuskLog.log("guest", "userdata seed \(seededWith ?? "unversioned") -> \(seedVersion); "
-                               + "starting from a clean partition")
-            try? fm.removeItem(atPath: userdataPath)
+        // Missing metadata is normal for snapshots installed by the broken
+        // seed-less build. Never erase existing userdata during app preparation.
+        if fm.fileExists(atPath: userdataPath) {
+            HuskLog.log("guest", "preserving existing userdata/snapshot (seed marker: \(seededWith ?? "absent"))")
         }
         if !fm.fileExists(atPath: userdataPath) {
             guard let seed = Bundle.main.path(forResource: "lineage-vdb-seed", ofType: "qcow2") else {
@@ -451,6 +448,50 @@ final class GuestImage: ObservableObject {
             try? seedVersion.write(to: seedStamp, atomically: true, encoding: .utf8)
             HuskLog.log("guest", "userdata disk staged to Documents")
         }
+    }
+
+    /// Bounded file/header checks before QEMU's fatal command-line error paths.
+    /// This is not a full disk integrity check and never reads a whole snapshot.
+    func validateLaunchFiles() throws {
+        func fail(_ path: String, _ reason: String) -> NSError {
+            NSError(domain: "husk.preflight", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "\((path as NSString).lastPathComponent): \(reason)"
+            ])
+        }
+        let fm = FileManager.default
+        for path in [firmwarePath, varsPath, userdataPath, diskPath] {
+            guard fm.isReadableFile(atPath: path),
+                  let attrs = try? fm.attributesOfItem(atPath: path),
+                  attrs[.type] as? FileAttributeType == .typeRegular,
+                  let size = (attrs[.size] as? NSNumber)?.uint64Value, size > 0 else {
+                throw fail(path, "missing, empty, or unreadable file")
+            }
+            if path == firmwarePath {
+                guard size == 64 * 1024 * 1024 else { throw fail(path, "wrong firmware size") }
+                continue
+            }
+            guard fm.isWritableFile(atPath: path) else { throw fail(path, "file is not writable") }
+            let file = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            defer { try? file.close() }
+            let header = Array(try file.read(upToCount: 104) ?? Data())
+            guard header.count >= 72, Array(header.prefix(4)) == [0x51, 0x46, 0x49, 0xfb] else {
+                throw fail(path, "invalid QCOW2 header; existing data was left untouched")
+            }
+            func uint(_ start: Int, _ length: Int) -> UInt64 {
+                header[start..<(start + length)].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+            }
+            let version = uint(4, 4)
+            guard version == 2 || (version == 3 && header.count >= 104),
+                  uint(8, 8) == 0, uint(16, 4) == 0, uint(24, 8) > 0 else {
+                throw fail(path, "unsupported, externally backed, or truncated QCOW2 image")
+            }
+            let expected: UInt64 = path == varsPath ? 64 * 1024 * 1024
+                : path == userdataPath ? 16 * 1024 * 1024 * 1024 : 0
+            if expected != 0 && uint(24, 8) != expected {
+                throw fail(path, "incorrect virtual disk size")
+            }
+        }
+        HuskLog.log("preflight", "PASS: firmware, UEFI variables, userdata, and system disk are ready")
     }
 
     func download() {

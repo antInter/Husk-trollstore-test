@@ -83,7 +83,7 @@ struct ContentView: View {
                     // it hidden and talks to it over ADB instead.
                     showGuestScreen = (chosen == .fullScreen)
                     start()
-                    if chosen == .library { AndroidHost.shared.waitForReady() }
+                    if started && chosen == .library { AndroidHost.shared.waitForReady() }
                 }
             }
         }
@@ -98,6 +98,9 @@ struct ContentView: View {
         } message: {
             Text(guest.update.detail)
         }
+        .onChange(of: runner.startupError) { error in
+            if error != nil { started = false; runningApp = nil }
+        }
         .onAppear { evaluate() }
         // The two-parameter onChange is iOS 17; this single-parameter form is
         // deprecated there but still works, and is the only one that compiles
@@ -110,7 +113,19 @@ struct ContentView: View {
     }
 
     private func evaluate() {
-        try? guest.prepareFirmware()
+        guard !started, !runner.isRunning else { return }
+        // Preparation must not touch disks while a snapshot is being installed.
+        switch guest.state {
+        case .downloading, .installing: return
+        default: break
+        }
+        do {
+            try guest.prepareFirmware()
+            runner.startupError = nil
+        } catch {
+            runner.startupError = error.localizedDescription
+            HuskLog.log("preflight", "preparation failed: \(error.localizedDescription)")
+        }
         guest.refresh()
         HuskBridgeFS.shared.prepare()
 
@@ -133,6 +148,16 @@ struct ContentView: View {
 
     private func start() {
         guard !started else { return }
+        do {
+            try guest.prepareFirmware()
+            try guest.validateLaunchFiles()
+            runner.startupError = nil
+        } catch {
+            runner.startupError = error.localizedDescription
+            HuskLog.log("preflight", "FAIL: refusing to start QEMU: \(error.localizedDescription)")
+            HuskLog.flushNow()
+            return
+        }
         guard JITBootstrap.isProcessDebugged else { return }
         HuskLog.log("ui", "CS_DEBUGGED set; starting QEMU")
         // Take the JIT region at the last moment before QEMU, as well as before
@@ -274,6 +299,14 @@ struct SetupView: View {
                 Text("Android app launcher")
                     .font(.footnote).foregroundStyle(.secondary)
 
+                if let error = runner.startupError {
+                    VStack(spacing: 6) {
+                        Text("Android could not start").font(.headline)
+                        Text(error).font(.caption).multilineTextAlignment(.center)
+                        Button("View logs") { showLogs = true }
+                    }
+                    .foregroundStyle(.orange).padding(.horizontal, 24)
+                }
                 content
                 if JITBootstrap.isTrollStoreBuild {
                     Text("Experimental iOS 15 build · Software graphics")
@@ -823,10 +856,7 @@ struct LogView: View {
                 }
             }
             .sheet(isPresented: $showShare) {
-                ShareSheet(items: [
-                    HuskLog.logFileURL,
-                    URL(fileURLWithPath: QemuRunner.shared.guestSerialLogPath),
-                ])
+                ShareSheet(items: HuskLog.diagnosticFiles.map { $0 as Any })
             }
         }
         .navigationViewStyle(.stack)

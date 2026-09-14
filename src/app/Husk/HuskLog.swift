@@ -41,6 +41,29 @@ enum HuskLog {
             .appendingPathComponent("husk.log")
     }
 
+    private static func rotateLog(_ url: URL) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return }
+        for index in stride(from: 3, through: 1, by: -1) {
+            let source = index == 1 ? url : url.appendingPathExtension(String(index - 1))
+            let destination = url.appendingPathExtension(String(index))
+            guard fm.fileExists(atPath: source.path) else { continue }
+            if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+            try fm.moveItem(at: source, to: destination)
+        }
+    }
+
+    static var diagnosticFiles: [URL] {
+        let documents = logFileURL.deletingLastPathComponent()
+        var files = [logFileURL, documents.appendingPathComponent("guest-serial.log"),
+                     documents.appendingPathComponent("husk-snapshot-pins.json")]
+        for index in 1...3 {
+            files.append(logFileURL.appendingPathExtension(String(index)))
+            files.append(documents.appendingPathComponent("guest-serial.log.\(index)"))
+        }
+        return files.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
     static func recentLines(_ n: Int = 400) -> [String] {
         ringLock.lock(); defer { ringLock.unlock() }
         return Array(ring.suffix(n))
@@ -58,11 +81,15 @@ enum HuskLog {
         // failure must never be able to kill the app it is trying to diagnose.
         signal(SIGPIPE, SIG_IGN)
 
-        // Fresh file each launch. StikDebug relaunches us after attaching, so the
-        // run that matters is always the most recent one; keeping the previous
-        // run's noise would make the log harder to read, not easier.
         let url = logFileURL
-        logFD = open(url.path, O_CREAT | O_WRONLY | O_TRUNC, 0o644)
+        // Retain three previous sessions so reopening cannot immediately erase
+        // the last failure. Append rather than truncate if rotation fails.
+        var flags = O_CREAT | O_WRONLY | O_TRUNC
+        do {
+            try rotateLog(url)
+            try rotateLog(url.deletingLastPathComponent().appendingPathComponent("guest-serial.log"))
+        } catch { flags = O_CREAT | O_WRONLY | O_APPEND }
+        logFD = open(url.path, flags, 0o644)
 
         redirectStdio()
         installCrashHandlers()
