@@ -11,7 +11,7 @@ debugger attaching at runtime. See [docs/01-licensing.md](docs/01-licensing.md).
 
 ## TS15 seed-fix r2
 
-This revision addresses the observed QEMU exit caused by a missing
-`lineage-efi-vars.fd`. The original TS15 IPA omitted both seed disks.
-It does not claim that Android has been device-tested after the fix.
+this revision addresses the observed QEMU exit caused by a missing
+`lineage-efi-vars.fd`. the original TS15 IPA omitted both seed disk
 
+sorta device tested on iOS 15.6.1, pr coming soon
